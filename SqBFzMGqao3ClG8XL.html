@@ -1,0 +1,664 @@
+<html><head><base href=".">
+<title>3D Roller Coaster Experience with Spline Editor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+body { margin: 0; overflow: hidden; }
+canvas { display: block; }
+#controls {
+    position: fixed;
+    top: 20px;
+    left: 20px;
+    color: white;
+    font-family: Arial, sans-serif;
+    background: rgba(0,0,0,0.5);
+    padding: 10px;
+    border-radius: 5px;
+}
+#editControls {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    color: white;
+    font-family: Arial, sans-serif;
+    background: rgba(0,0,0,0.5);
+    padding: 10px;
+    border-radius: 5px;
+}
+.button {
+    background: #444;
+    border: none;
+    color: white;
+    padding: 5px 10px;
+    margin: 5px;
+    border-radius: 3px;
+    cursor: pointer;
+}
+.button:hover {
+    background: #555;
+}
+.modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0,0,0,0.7);
+    z-index: 1000;
+}
+.modal-content {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(40, 40, 40, 0.95);
+    padding: 20px;
+    border-radius: 10px;
+    color: white;
+    min-width: 300px;
+}
+.save-slot {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: rgba(60, 60, 60, 0.8);
+    margin: 10px 0;
+    padding: 10px;
+    border-radius: 5px;
+}
+.close-modal {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    cursor: pointer;
+    font-size: 20px;
+}
+.slot-name {
+    flex: 1;
+    margin-right: 10px;
+}
+.name-input {
+    background: rgba(60, 60, 60, 0.8);
+    border: 1px solid #666;
+    color: white;
+    padding: 2px 5px;
+    border-radius: 3px;
+    width: 150px;
+}
+.slot-buttons {
+    display: flex;
+    gap: 5px;
+}
+</style>
+</head>
+<body>
+<div id="controls">
+    Use WASD to move camera<br>
+    Mouse to look around<br>
+    Space to start/stop ride
+</div>
+<div id="editControls">
+    <button class="button" id="addPoint">Add Point</button>
+    <button class="button" id="removePoint">Remove Last Point</button>
+    <button class="button" id="toggleEdit">Toggle Edit Mode</button>
+    <button class="button" id="loadTrack">Manage Tracks</button>
+    <button class="button" id="closeLoop">Close Loop</button>
+</div>
+<div id="saveLoadModal" class="modal">
+    <div class="modal-content">
+        <span class="close-modal">&times;</span>
+        <h2>Save/Load Track</h2>
+        <div id="saveSlots">
+            <!-- Save slots will be generated here -->
+        </div>
+    </div>
+</div>
+<script>
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87CEEB); // Sky blue
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer();
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+let trackPoints = [];
+let curves = [];
+const controlPoints = [];
+let editMode = false;
+let selectedPoint = null;
+const dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const mouse = new THREE.Vector2();
+const raycaster = new THREE.Raycaster();
+let isMouseDown = false;
+let previousMousePosition = { x: 0, y: 0 };
+let previousEditMode = false;
+
+function createCloud() {
+    const cloudGeometry = new THREE.SphereGeometry(2, 8, 8);
+    const cloudMaterial = new THREE.MeshPhongMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.8,
+    });
+    const cloud = new THREE.Mesh(cloudGeometry, cloudMaterial);
+    
+    cloud.position.set(
+        (Math.random() - 0.5) * 150,
+        50 + Math.random() * 20,
+        (Math.random() - 0.5) * 150
+    );
+    
+    const scale = 1 + Math.random() * 2;
+    cloud.scale.set(scale, scale * 0.6, scale);
+    
+    return cloud;
+}
+
+const cloudGroup = new THREE.Group();
+scene.add(cloudGroup);
+
+for(let i = 0; i < 20; i++) {
+    cloudGroup.add(createCloud());
+}
+
+for(let i = 0; i < 10; i++) {
+    const t = i / 10;
+    const x = Math.sin(t * Math.PI * 4) * 20;
+    const y = Math.cos(t * Math.PI * 2) * 5 + 10;
+    const z = t * 100 - 50;
+    addControlPoint(new THREE.Vector3(x, y, z));
+}
+
+function addControlPoint(position) {
+    const geometry = new THREE.SphereGeometry(0.5, 32, 32);
+    const material = new THREE.MeshPhongMaterial({ color: 0x00ff00 });
+    const point = new THREE.Mesh(geometry, material);
+    point.position.copy(position);
+    scene.add(point);
+    controlPoints.push(point);
+    trackPoints.push(position.clone());
+    updateTrack();
+}
+
+function updateTrack() {
+    if (trackPoints.length < 2) return;
+
+    scene.children.forEach(child => {
+        if (child.isTrack) scene.remove(child);
+    });
+
+    try {
+        const curve = new THREE.CatmullRomCurve3(trackPoints);
+        const trackGroup = new THREE.Group();
+        trackGroup.isTrack = true;
+
+        const mainRailGeometry = new THREE.TubeGeometry(curve, 100, 0.3, 8, false);
+        const railMaterial = new THREE.MeshPhongMaterial({
+            color: 0x888888,
+            metalness: 0.8,
+            roughness: 0.3,
+            shininess: 100
+        });
+        const mainRail = new THREE.Mesh(mainRailGeometry, railMaterial);
+        trackGroup.add(mainRail);
+
+        const supportCount = 15;
+        for(let i = 0; i < supportCount; i++) {
+            const t = i / supportCount;
+            const point = curve.getPoint(t);
+            
+            const height = point.y + 1;
+            const supportGeometry = new THREE.CylinderGeometry(0.2, 0.2, height, 8);
+            const supportMaterial = new THREE.MeshPhongMaterial({ color: 0x666666 });
+            const support = new THREE.Mesh(supportGeometry, supportMaterial);
+            
+            support.position.set(point.x, point.y - height / 2, point.z);
+            trackGroup.add(support);
+        }
+
+        scene.add(trackGroup);
+        curves = [curve];
+    } catch (error) {
+        console.error('Error updating track:', error);
+    }
+}
+
+const ambientLight = new THREE.AmbientLight(0x404040);
+scene.add(ambientLight);
+const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+directionalLight.position.set(10, 20, 10);
+scene.add(directionalLight);
+
+const groundGeometry = new THREE.PlaneGeometry(200, 200);
+const groundMaterial = new THREE.MeshPhongMaterial({
+    color: 0x33aa33,
+    side: THREE.DoubleSide
+});
+const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+ground.rotation.x = Math.PI / 2;
+ground.position.y = -1;
+scene.add(ground);
+
+const cartGroup = new THREE.Group();
+const cartBody = new THREE.Mesh(
+    new THREE.BoxGeometry(2, 1, 3),
+    new THREE.MeshPhongMaterial({ color: 0x3366ff })
+);
+cartBody.position.y = 0.5;
+cartGroup.add(cartBody);
+
+const cartSeat = new THREE.Mesh(
+    new THREE.BoxGeometry(1.5, 0.5, 2),
+    new THREE.MeshPhongMaterial({ color: 0x2244cc })
+);
+cartSeat.position.y = 1;
+cartGroup.add(cartSeat);
+
+const wheelGeometry = new THREE.CylinderGeometry(0.3, 0.3, 0.2, 16);
+const wheelMaterial = new THREE.MeshPhongMaterial({ color: 0x222222 });
+
+const wheels = [
+    { x: -1, z: -1 },
+    { x: 1, z: -1 },
+    { x: -1, z: 1 },
+    { x: 1, z: 1 }
+];
+
+wheels.forEach(pos => {
+    const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
+    wheel.rotation.z = Math.PI / 2;
+    wheel.position.set(pos.x, 0, pos.z);
+    cartGroup.add(wheel);
+});
+
+scene.add(cartGroup);
+
+camera.position.set(0, 20, 30);
+camera.lookAt(0, 10, 0);
+let cameraDirection = new THREE.Vector3();
+let isRiding = false;
+let progress = 0;
+let cartSpeed = 0.001; // Initial speed
+const minSpeed = 0.0005; // Minimum speed
+const maxSpeed = 0.003; // Maximum speed
+const gravity = 0.00001; // Gravity effect multiplier
+
+let moveForward = false;
+let moveBackward = false;
+let moveLeft = false;
+let moveRight = false;
+
+document.addEventListener('keydown', (e) => {
+    if(e.code === 'Space') {
+        isRiding = !isRiding;
+        if(!isRiding) {
+            camera.position.set(0, 20, 30);
+            camera.lookAt(0, 10, 0);
+            cartGroup.visible = false;
+            editMode = previousEditMode; // Restore previous edit mode state
+            controlPoints.forEach(point => {
+                point.material.color.setHex(editMode ? 0xff0000 : 0x00ff00);
+            });
+        } else {
+            cartGroup.visible = true;
+            previousEditMode = editMode; // Store current edit mode state
+            editMode = false; // Turn off edit mode while riding
+            controlPoints.forEach(point => {
+                point.material.color.setHex(0x00ff00);
+            });
+        }
+    }
+    if(!isRiding) {
+        switch(e.code) {
+            case 'KeyW': moveForward = true; break;
+            case 'KeyS': moveBackward = true; break;
+            case 'KeyA': moveLeft = true; break;
+            case 'KeyD': moveRight = true; break;
+        }
+    }
+});
+
+document.addEventListener('keyup', (e) => {
+    if(!isRiding) {
+        switch(e.code) {
+            case 'KeyW': moveForward = false; break;
+            case 'KeyS': moveBackward = false; break;
+            case 'KeyA': moveLeft = false; break;
+            case 'KeyD': moveRight = false; break;
+        }
+    }
+});
+
+document.addEventListener('mousedown', (e) => {
+    isMouseDown = true;
+    previousMousePosition = {
+        x: e.clientX,
+        y: e.clientY
+    };
+});
+
+document.addEventListener('mouseup', () => {
+    isMouseDown = false;
+});
+
+document.addEventListener('mousemove', (e) => {
+    if (!isRiding && isMouseDown && !selectedPoint) {
+        const deltaMove = {
+            x: e.clientX - previousMousePosition.x,
+            y: e.clientY - previousMousePosition.y
+        };
+
+        camera.rotateOnWorldAxis(
+            new THREE.Vector3(0, 1, 0),
+            -toRadians(deltaMove.x * 0.1)
+        );
+
+        camera.rotateX(-toRadians(deltaMove.y * 0.1));
+
+        previousMousePosition = {
+            x: e.clientX,
+            y: e.clientY
+        };
+    }
+});
+
+function toRadians(angle) {
+    return angle * (Math.PI / 180);
+}
+
+function animate() {
+    requestAnimationFrame(animate);
+
+    cloudGroup.children.forEach(cloud => {
+        moveCloud(cloud, 1);
+    });
+
+    if(isRiding && curves.length > 0) {
+        const currentPoint = curves[0].getPoint(progress);
+        const nextProgress = (progress + 0.01) % 1;
+        const nextPoint = curves[0].getPoint(nextProgress);
+        
+        const elevationChange = nextPoint.y - currentPoint.y;
+        cartSpeed -= elevationChange * gravity;
+        cartSpeed = Math.max(minSpeed, Math.min(maxSpeed, cartSpeed));
+        progress += cartSpeed;
+        if(progress >= 1) progress = 0;
+
+        try {
+            const point = curves[0].getPoint(progress);
+            const lookAhead = curves[0].getPoint((progress + 0.01) % 1);
+            const tangent = curves[0].getTangent(progress);
+
+            cartGroup.position.copy(point);
+            cartGroup.lookAt(lookAhead);
+
+            const cameraOffset = new THREE.Vector3(0, 2.5, -1);
+            const rotatedOffset = cameraOffset.applyQuaternion(cartGroup.quaternion);
+            camera.position.copy(point).add(rotatedOffset);
+            
+            const forwardOffset = new THREE.Vector3(0, 2.5, 10);
+            const rotatedLookAt = forwardOffset.applyQuaternion(cartGroup.quaternion);
+            const lookAtPoint = point.clone().add(rotatedLookAt);
+            camera.lookAt(lookAtPoint);
+            
+            cartGroup.up.set(0, 1, 0);
+        } catch (error) {
+            console.error('Error during ride:', error);
+            isRiding = false;
+        }
+    } else {
+        cartGroup.visible = false;
+    }
+
+    if (!isRiding) {
+        camera.getWorldDirection(cameraDirection);
+        const movementSpeed = 0.5;
+
+        if (moveForward) {
+            camera.position.addScaledVector(cameraDirection, movementSpeed);
+        }
+        if (moveBackward) {
+            camera.position.addScaledVector(cameraDirection, -movementSpeed);
+        }
+        if (moveLeft) {
+            const leftDirection = new THREE.Vector3().crossVectors(camera.up, cameraDirection).normalize();
+            camera.position.addScaledVector(leftDirection, movementSpeed);
+        }
+        if (moveRight) {
+            const rightDirection = new THREE.Vector3().crossVectors(cameraDirection, camera.up).normalize();
+            camera.position.addScaledVector(rightDirection, movementSpeed);
+        }
+    }
+
+    renderer.render(scene, camera);
+}
+
+function moveCloud(cloud, delta) {
+    cloud.position.x += delta * 0.05;
+    if(cloud.position.x > 75) {
+        cloud.position.x = -75;
+    }
+}
+
+function saveTrack(slotIndex) {
+    const trackData = trackPoints.map(point => ({
+        x: point.x,
+        y: point.y,
+        z: point.z
+    }));
+    
+    try {
+        localStorage.setItem(`coasterTrack_${slotIndex}`, JSON.stringify(trackData));
+        alert('Track saved successfully!');
+        showSaveLoadMenu();
+    } catch (error) {
+        console.error('Error saving track:', error);
+        alert('Error saving track');
+    }
+}
+
+function loadTrack(slotIndex) {
+    try {
+        const savedData = localStorage.getItem(`coasterTrack_${slotIndex}`);
+        if (!savedData) {
+            alert('No saved track found in this slot');
+            return;
+        }
+
+        const trackData = JSON.parse(savedData);
+        
+        controlPoints.forEach(point => scene.remove(point));
+        controlPoints.length = 0;
+        trackPoints.length = 0;
+        
+        trackData.forEach(point => {
+            addControlPoint(new THREE.Vector3(point.x, point.y, point.z));
+        });
+        
+        updateTrack();
+        document.getElementById('saveLoadModal').style.display = 'none';
+        alert('Track loaded successfully!');
+    } catch (error) {
+        console.error('Error loading track:', error);
+        alert('Error loading track');
+    }
+}
+
+function deleteTrack(slotIndex) {
+    if (confirm('Are you sure you want to delete this save?')) {
+        localStorage.removeItem(`coasterTrack_${slotIndex}`);
+        localStorage.removeItem(`coasterTrack_${slotIndex}_name`);
+        showSaveLoadMenu();
+    }
+}
+
+function renameTrack(slotIndex) {
+    const slot = document.querySelectorAll('.save-slot')[slotIndex];
+    const nameDisplay = slot.querySelector('.name-display');
+    const nameInput = slot.querySelector('.name-input');
+    
+    if (nameDisplay.style.display !== 'none') {
+        nameDisplay.style.display = 'none';
+        nameInput.style.display = 'inline-block';
+        nameInput.focus();
+        
+        nameInput.onblur = () => {
+            const newName = nameInput.value.trim();
+            if (newName) {
+                nameDisplay.textContent = newName;
+                localStorage.setItem(`coasterTrack_${slotIndex}_name`, newName);
+            }
+            nameDisplay.style.display = 'inline-block';
+            nameInput.style.display = 'none';
+        };
+        
+        nameInput.onkeypress = (e) => {
+            if (e.key === 'Enter') {
+                nameInput.blur();
+            }
+        };
+    }
+}
+
+function showSaveLoadMenu() {
+    const modal = document.getElementById('saveLoadModal');
+    const slotsContainer = document.getElementById('saveSlots');
+    slotsContainer.innerHTML = '';
+
+    const savedTracks = [];
+    for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key.startsWith('coasterTrack_')) {
+            savedTracks.push({
+                key: key,
+                name: localStorage.getItem(key + '_name') || `Save ${key.replace('coasterTrack_', '')}`
+            });
+        }
+    }
+
+    while (savedTracks.length < 5) {
+        savedTracks.push(null);
+    }
+
+    savedTracks.forEach((save, index) => {
+        const slot = document.createElement('div');
+        slot.className = 'save-slot';
+        
+        const slotName = save ? save.name : `Empty Slot ${index + 1}`;
+        
+        slot.innerHTML = `
+            <div class="slot-name">
+                <span class="name-display">${slotName}</span>
+                <input type="text" class="name-input" style="display: none;" value="${slotName}">
+            </div>
+            <div class="slot-buttons">
+                <button class="button" onclick="saveTrack(${index})">Save</button>
+                ${save ? `
+                    <button class="button" onclick="loadTrack(${index})">Load</button>
+                    <button class="button" onclick="renameTrack(${index})">Rename</button>
+                    <button class="button" onclick="deleteTrack(${index})">Delete</button>
+                ` : ''}
+            </div>
+        `;
+        
+        slotsContainer.appendChild(slot);
+    });
+
+    modal.style.display = 'block';
+}
+
+document.querySelector('.close-modal').addEventListener('click', () => {
+    document.getElementById('saveLoadModal').style.display = 'none';
+});
+
+document.getElementById('loadTrack').addEventListener('click', showSaveLoadMenu);
+
+window.addEventListener('click', (event) => {
+    const modal = document.getElementById('saveLoadModal');
+    if (event.target === modal) {
+        modal.style.display = 'none';
+    }
+});
+
+document.getElementById('addPoint').addEventListener('click', () => {
+    const position = new THREE.Vector3(
+        camera.position.x + camera.getWorldDirection(new THREE.Vector3()).x * 10,
+        camera.position.y + camera.getWorldDirection(new THREE.Vector3()).y * 10,
+        camera.position.z + camera.getWorldDirection(new THREE.Vector3()).z * 10
+    );
+    addControlPoint(position);
+});
+
+document.getElementById('removePoint').addEventListener('click', () => {
+    if (controlPoints.length > 0) {
+        const lastPoint = controlPoints.pop();
+        scene.remove(lastPoint);
+        trackPoints.pop();
+        updateTrack();
+    }
+});
+
+document.getElementById('toggleEdit').addEventListener('click', () => {
+    editMode = !editMode;
+    controlPoints.forEach(point => {
+        point.material.color.setHex(editMode ? 0xff0000 : 0x00ff00);
+    });
+});
+
+document.getElementById('closeLoop').addEventListener('click', () => {
+    if (trackPoints.length >= 3) { // Need at least 3 points to make a meaningful loop
+        addControlPoint(trackPoints[0].clone());
+        updateTrack();
+    } else {
+        alert('Need at least 3 points to close the loop');
+    }
+});
+
+document.addEventListener('mousemove', (event) => {
+    if (editMode && selectedPoint) {
+        event.preventDefault();
+        
+        mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+        
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.ray.intersectPlane(dragPlane, new THREE.Vector3());
+        
+        if (intersects) {
+            selectedPoint.position.copy(intersects);
+            const index = controlPoints.indexOf(selectedPoint);
+            if (index !== -1) {
+                trackPoints[index].copy(intersects);
+                updateTrack();
+            }
+        }
+    }
+});
+
+renderer.domElement.addEventListener('mousedown', (event) => {
+    if (!editMode) return;
+    
+    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+    
+    raycaster.setFromCamera(mouse, camera);
+    const intersects = raycaster.intersectObjects(controlPoints);
+    
+    if (intersects.length > 0) {
+        selectedPoint = intersects[0].object;
+        dragPlane.setFromNormalAndCoplanarPoint(
+            camera.getWorldDirection(new THREE.Vector3()),
+            selectedPoint.position
+        );
+    }
+});
+
+document.addEventListener('mouseup', () => {
+    selectedPoint = null;
+});
+
+animate();
+
+</script>
+</body>
+</html>
